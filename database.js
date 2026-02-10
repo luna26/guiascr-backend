@@ -71,9 +71,8 @@ const ExtensionKey = sequelize.define('ExtensionKey', {
     }
   },
   accessKey: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: false,
-    unique: true,
     comment: 'Access key para la extensión (sk_...)'
   },
   name: {
@@ -95,7 +94,14 @@ const ExtensionKey = sequelize.define('ExtensionKey', {
   }
 }, {
   tableName: 'extension_keys',
-  timestamps: true
+  timestamps: true,
+  indexes: [
+    {
+      unique: true,
+      fields: ['accessKey'],
+      name: 'extension_keys_access_key_unique'
+    }
+  ]
 });
 
 // ============================================================================
