@@ -31,7 +31,11 @@ app.use(express.json());
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SCOPES = 'read_orders,read_fulfillments';
-const APP_URL = process.env.APP_URL;
+const APP_URL = process.env.RAILWAY_PUBLIC_DOMAIN 
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` 
+  : 'http://localhost:3000';
+
+  console.log('--------- APP_URL', APP_URL)
 
 // Storage temporal para OAuth states
 const temporaryStates = new Map();
