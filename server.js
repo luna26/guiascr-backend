@@ -56,6 +56,8 @@ setInterval(() => {
 
 app.get('/api/auth', (req, res) => {
   const shop = req.query.shop;
+
+    console.log('🔵 INICIO OAuth para shop:', shop);
   
   if (!shop) {
     return res.status(400).send('Missing shop parameter');
@@ -69,6 +71,10 @@ app.get('/api/auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   const redirectUri = `${APP_URL}/api/auth/callback`;
 
+  console.log('🔵 APP_URL:', APP_URL);
+  console.log('🔵 Redirect URI:', redirectUri);
+  console.log('🔵 State:', state);
+
   temporaryStates.set(`state_${shop}`, { state, timestamp: Date.now() });
 
   const authUrl = `https://${shop}/admin/oauth/authorize?` +
@@ -76,6 +82,8 @@ app.get('/api/auth', (req, res) => {
     `scope=${SCOPES}&` +
     `redirect_uri=${redirectUri}&` +
     `state=${state}`;
+
+  console.log('🔵 Redirigiendo a Shopify OAuth URL:', authUrl);
 
   res.redirect(authUrl);
 });
