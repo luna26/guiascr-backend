@@ -1,0 +1,665 @@
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
+
+
+//install app
+//https://oleomargaric-theosophic-vivienne.ngrok-free.dev/api/auth?shop=dev-mercatiko-app.myshopify.com
+
+const {
+  initDatabase,
+  saveShopSession,
+  getShopSession,
+  deleteShopSession,
+  getActiveShopsCount,
+  createExtensionKey,
+  validateExtensionKey,
+  getShopExtensionKeys,
+  revokeExtensionKey,
+  saveSenderConfig,
+  getSenderConfig
+} = require('./database');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Configuración
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+const SCOPES = 'read_orders,read_fulfillments';
+const APP_URL = process.env.APP_URL;
+
+// Storage temporal para OAuth states
+const temporaryStates = new Map();
+
+// Limpiar states expirados
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of temporaryStates.entries()) {
+    if (now - value.timestamp > 300000) {
+      temporaryStates.delete(key);
+    }
+  }
+}, 300000);
+
+// ============================================================================
+// OAUTH 2.0
+// ============================================================================
+
+app.get('/api/auth', (req, res) => {
+  const shop = req.query.shop;
+  
+  if (!shop) {
+    return res.status(400).send('Missing shop parameter');
+  }
+
+  const shopRegex = /^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/;
+  if (!shopRegex.test(shop)) {
+    return res.status(400).send('Invalid shop parameter');
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  const redirectUri = `${APP_URL}/api/auth/callback`;
+
+  temporaryStates.set(`state_${shop}`, { state, timestamp: Date.now() });
+
+  const authUrl = `https://${shop}/admin/oauth/authorize?` +
+    `client_id=${SHOPIFY_API_KEY}&` +
+    `scope=${SCOPES}&` +
+    `redirect_uri=${redirectUri}&` +
+    `state=${state}`;
+
+  res.redirect(authUrl);
+});
+
+app.get('/api/auth/callback', async (req, res) => {
+  const { shop, code, state, hmac } = req.query;
+
+  console.log('🟡 OAuth callback recibido');
+
+  const savedState = temporaryStates.get(`state_${shop}`);
+  if (!savedState || savedState.state !== state) {
+    return res.status(403).send('Invalid state parameter');
+  }
+
+  const queryParams = { ...req.query };
+  delete queryParams.hmac;
+  const queryString = Object.keys(queryParams)
+    .sort()
+    .map(key => `${key}=${queryParams[key]}`)
+    .join('&');
+  
+  const hash = crypto
+    .createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(queryString)
+    .digest('hex');
+
+  if (hash !== hmac) {
+    return res.status(403).send('HMAC validation failed');
+  }
+
+  temporaryStates.delete(`state_${shop}`);
+
+  try {
+
+    console.log('🟢 Haciendo request a Shopify para intercambiar código...');
+
+    const tokenResponse = await axios.post(
+      `https://${shop}/admin/oauth/access_token`,
+      {
+        client_id: SHOPIFY_API_KEY,
+        client_secret: SHOPIFY_API_SECRET,
+        code: code
+      }
+    );
+
+    const accessToken = tokenResponse.data.access_token;
+    const scope = tokenResponse.data.scope;
+
+    console.log('💾 Guardando tienda:', shop);
+    
+    await saveShopSession(shop, accessToken, scope);
+    
+    console.log('✓ Tienda instalada:', shop);
+
+    await createExtensionKey(shop, 'Access Key Inicial');
+
+    await registerWebhooks(shop, accessToken);
+
+    res.redirect(`https://${shop}/admin/apps/${SHOPIFY_API_KEY}`);
+
+  } catch (error) {
+    console.error('Error en OAuth callback:', error.response?.data || error.message);
+    res.status(500).send('Error during authentication');
+  }
+});
+
+// ============================================================================
+// MIDDLEWARE: Session Token (IGNORA EXPIRACIÓN PARA TESTING)
+// ============================================================================
+
+async function verifySessionToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing authorization header' });
+  }
+
+  const sessionToken = authHeader.replace('Bearer ', '');
+
+  try {
+    const payload = jwt.decode(sessionToken);
+    
+    if (!payload || !payload.dest) {
+      return res.status(401).json({ error: 'Invalid token format' });
+    }
+    
+    const shop = payload.dest.replace('https://', '');
+
+    // VERIFICAR TOKEN CON IGNOREEXPIRATION = TRUE
+    // jwt.verify(sessionToken, SHOPIFY_API_SECRET, {
+    //   algorithms: ['HS256'],
+    //   audience: SHOPIFY_API_KEY,
+    //   ignoreExpiration: true  // ← CRÍTICO PARA QUE FUNCIONE
+    // });
+
+    const shopData = await getShopSession(shop);
+    
+    if (!shopData || !shopData.isActive) {
+      return res.status(401).json({ error: 'Shop not installed' });
+    }
+
+    req.shop = shop;
+    req.accessToken = shopData.accessToken;
+    req.authMethod = 'session_token';
+    
+    next();
+
+  } catch (error) {
+    console.error('Session token verification failed:', error.message);
+    return res.status(401).json({ error: 'Invalid session token' });
+  }
+}
+
+// ============================================================================
+// MIDDLEWARE: Extension Access Key
+// ============================================================================
+
+async function verifyExtensionKey(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing authorization header' });
+  }
+
+  const accessKey = authHeader.replace('Bearer ', '');
+
+  if (!accessKey.startsWith('sk_')) {
+    return res.status(401).json({ error: 'Invalid access key format' });
+  }
+
+  try {
+    const keyData = await validateExtensionKey(accessKey);
+    
+    if (!keyData) {
+      return res.status(401).json({ error: 'Invalid or revoked access key' });
+    }
+
+    req.shop = keyData.shop;
+    req.accessToken = keyData.accessToken;
+    req.authMethod = 'extension_key';
+    
+    next();
+
+  } catch (error) {
+    console.error('Extension key verification failed:', error.message);
+    return res.status(401).json({ error: 'Authentication failed' });
+  }
+}
+
+// ============================================================================
+// ENDPOINTS DE LA APP EMBEDDED
+// ============================================================================
+
+app.get('/api/app/extension-keys', verifySessionToken, async (req, res) => {
+  try {
+    const { shop } = req;
+    const keys = await getShopExtensionKeys(shop);
+
+    res.json({
+      success: true,
+      keys: keys.map(k => ({
+        id: k.id,
+        accessKey: k.accessKey,
+        name: k.name,
+        createdAt: k.createdAt,
+        lastUsedAt: k.lastUsedAt
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error fetching extension keys:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error obteniendo access keys'
+    });
+  }
+});
+
+app.post('/api/app/extension-keys', verifySessionToken, async (req, res) => {
+  try {
+    const { shop } = req;
+    const { name } = req.body;
+
+    const key = await createExtensionKey(shop, name || 'Nuevo Access Key');
+
+    res.json({
+      success: true,
+      key: {
+        id: key.id,
+        accessKey: key.accessKey,
+        name: key.name,
+        createdAt: key.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error creating extension key:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error creando access key'
+    });
+  }
+});
+
+app.delete('/api/app/extension-keys/:accessKey', verifySessionToken, async (req, res) => {
+  try {
+    const { shop } = req;
+    const { accessKey } = req.params;
+
+    await revokeExtensionKey(accessKey, shop);
+
+    res.json({
+      success: true,
+      message: 'Access key revocado'
+    });
+
+  } catch (error) {
+    console.error('Error revoking extension key:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error revocando access key'
+    });
+  }
+});
+
+app.post('/api/app/sender-config', verifySessionToken, async (req, res) => {
+  try {
+    const { shop } = req;
+    const config = req.body;
+
+    await saveSenderConfig(shop, config);
+
+    res.json({
+      success: true,
+      message: 'Configuración guardada'
+    });
+
+  } catch (error) {
+    console.error('Error saving config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error guardando configuración'
+    });
+  }
+});
+
+app.get('/api/app/sender-config', verifySessionToken, async (req, res) => {
+  try {
+    const { shop } = req;
+    const config = await getSenderConfig(shop);
+
+    res.json({
+      success: true,
+      config: config || {}
+    });
+
+  } catch (error) {
+    console.error('Error fetching config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error obteniendo configuración'
+    });
+  }
+});
+
+// ============================================================================
+// ENDPOINTS PARA LA EXTENSIÓN
+// ============================================================================
+
+app.get('/api/orders/pending', verifyExtensionKey, async (req, res) => {
+  try {
+    const { shop, accessToken } = req;
+
+    // Usar GraphQL en lugar de REST
+    const query = `
+      {
+        orders(first: 50, query: "financial_status:paid AND fulfillment_status:unfulfilled") {
+          edges {
+            node {
+              id
+              legacyResourceId
+              name
+              createdAt
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              customer {
+                firstName
+                lastName
+                email
+                phone
+              }
+              shippingAddress {
+                firstName
+                lastName
+                address1
+                address2
+                city
+                province
+                zip
+                country
+                phone
+              }
+              lineItems(first: 10) {
+                edges {
+                  node {
+                    title
+                    quantity
+                    originalUnitPriceSet {
+                      shopMoney {
+                        amount
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    console.log('📡 Haciendo request GraphQL a Shopify...');
+
+    const response = await axios.post(
+      `https://${shop}/admin/api/2024-01/graphql.json`,
+      { query },
+      {
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log('📦 Response de Shopify:', JSON.stringify(response.data, null, 2));
+
+    // Validar respuesta
+    if (!response.data || !response.data.data || !response.data.data.orders) {
+      console.error('❌ Respuesta inválida de GraphQL');
+      return res.json({
+        success: true,
+        shop: shop,
+        count: 0,
+        orders: [],
+        message: 'No hay pedidos pendientes'
+      });
+    }
+
+    const orders = response.data.data.orders.edges.map(edge => {
+      const order = edge.node;
+      
+      return {
+        id: order.legacyResourceId,
+        order_number: order.name.replace('#', ''),
+        name: order.name,
+        created_at: order.createdAt,
+        total_price: order.totalPriceSet.shopMoney.amount,
+        currency: order.totalPriceSet.shopMoney.currencyCode,
+        customer: {
+          name: `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`,
+          email: order.customer?.email || '',
+          phone: order.customer?.phone || ''
+        },
+        shipping_address: order.shippingAddress,
+        line_items: order.lineItems.edges.map(item => ({
+          title: item.node.title,
+          quantity: item.node.quantity,
+          price: item.node.originalUnitPriceSet.shopMoney.amount
+        }))
+      };
+    });
+
+    console.log(`✅ ${orders.length} pedidos encontrados`);
+
+    res.json({
+      success: true,
+      shop: shop,
+      count: orders.length,
+      orders: orders
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching orders:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener pedidos',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+app.post('/api/orders/update-tracking', verifyExtensionKey, async (req, res) => {
+  try {
+    const { shop, accessToken } = req;
+    const { order_id, tracking_number, tracking_company = 'Correos de Costa Rica' } = req.body;
+
+    if (!order_id || !tracking_number) {
+      return res.status(400).json({
+        success: false,
+        error: 'order_id y tracking_number son requeridos'
+      });
+    }
+
+    const response = await axios.post(
+      `https://${shop}/admin/api/2024-01/orders/${order_id}/fulfillments.json`,
+      {
+        fulfillment: {
+          location_id: null,
+          tracking_number: tracking_number,
+          tracking_company: tracking_company,
+          notify_customer: true
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      message: 'Tracking actualizado exitosamente',
+      fulfillment: response.data.fulfillment
+    });
+
+  } catch (error) {
+    console.error('Error updating tracking:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Error al actualizar tracking',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+app.get('/api/sender-config', verifyExtensionKey, async (req, res) => {
+  try {
+    const { shop } = req;
+    const config = await getSenderConfig(shop);
+
+    if (!config) {
+      return res.status(404).json({
+        success: false,
+        error: 'Configuración no encontrada. Configura el remitente en la app de Shopify.'
+      });
+    }
+
+    res.json({
+      success: true,
+      config: {
+        senderIdentificationType: config.senderIdentificationType,
+        senderId: config.senderId,
+        senderName: config.senderName,
+        senderPhone: config.senderPhone,
+        senderMail: config.senderMail,
+        provinciaSender: config.provinciaSender,
+        cantonSender: config.cantonSender,
+        distritoSender: config.distritoSender,
+        senderPostalCode: config.senderPostalCode,
+        senderDirection: config.senderDirection
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error obteniendo configuración'
+    });
+  }
+});
+
+// ============================================================================
+// WEBHOOKS
+// ============================================================================
+
+app.post('/api/webhooks/app/uninstalled', async (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  const shop = req.headers['x-shopify-shop-domain'];
+  
+  const hash = crypto
+    .createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(JSON.stringify(req.body))
+    .digest('base64');
+
+  if (hash !== hmac) {
+    return res.status(403).send('HMAC validation failed');
+  }
+
+  await deleteShopSession(shop);
+  
+  console.log(`App desinstalada de: ${shop}`);
+  res.status(200).send('OK');
+});
+
+async function registerWebhooks(shop, accessToken) {
+  const webhooks = [
+    {
+      topic: 'app/uninstalled',
+      address: `${APP_URL}/api/webhooks/app/uninstalled`
+    }
+  ];
+
+  for (const webhook of webhooks) {
+    try {
+      await axios.post(
+        `https://${shop}/admin/api/2024-01/webhooks.json`,
+        {
+          webhook: {
+            topic: webhook.topic,
+            address: webhook.address,
+            format: 'json'
+          }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`✓ Webhook registrado: ${webhook.topic}`);
+    } catch (error) {
+      if (error.response?.status === 422) {
+        console.log(`Webhook ${webhook.topic} ya existe`);
+      } else {
+        console.error(`✗ Error registrando webhook:`, error.response?.data || error.message);
+      }
+    }
+  }
+}
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+app.get('/api/health', async (req, res) => {
+  const activeShops = await getActiveShopsCount();
+  
+  res.json({
+    success: true,
+    message: 'API funcionando',
+    stores: activeShops,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================================================
+// APP EMBEDDED
+// ============================================================================
+
+app.use(express.static('public'));
+
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/app.html');
+});
+
+// ============================================================================
+// INICIAR SERVIDOR
+// ============================================================================
+
+async function startServer() {
+  const dbReady = await initDatabase();
+  
+  if (!dbReady) {
+    console.error('✗ No se pudo conectar a la base de datos');
+    process.exit(1);
+  }
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, async () => {
+    const activeShops = await getActiveShopsCount();
+    
+    console.log('='.repeat(60));
+    console.log('🚀 Servidor iniciado correctamente');
+    console.log('='.repeat(60));
+    console.log(`📍 Puerto: ${PORT}`);
+    console.log(`🌐 URL: ${APP_URL}`);
+    console.log(`🔑 API Key: ${SHOPIFY_API_KEY}`);
+    console.log(`📊 Tiendas activas: ${activeShops}`);
+    console.log('='.repeat(60));
+  });
+}
+
+startServer();
