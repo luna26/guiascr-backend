@@ -180,10 +180,10 @@ async function initDatabase() {
   try {
     await sequelize.authenticate();
     console.log('✓ Conexión a base de datos establecida');
-    
+
     await sequelize.sync({ alter: true });
     console.log('✓ Modelos sincronizados');
-    
+
     return true;
   } catch (error) {
     console.error('✗ Error conectando a la base de datos:', error);
@@ -206,7 +206,7 @@ async function saveShopSession(shop, accessToken, scope = null) {
       isActive: true
     });
 
-     console.log(`✓ Tienda ${created ? 'instalada' : 'actualizada'}: ${shop}`);
+    console.log(`✓ Tienda ${created ? 'instalada' : 'actualizada'}: ${shop}`);
     return shopRecord;
   } catch (error) {
     console.error('Error guardando tienda:', error);
@@ -222,7 +222,7 @@ async function getShopSession(shop) {
         isActive: true
       }
     });
-    
+
     return shopRecord;
   } catch (error) {
     console.error('Error obteniendo tienda:', error);
@@ -241,13 +241,13 @@ async function deleteShopSession(shop) {
         where: { shop }
       }
     );
-    
+
     // Desactivar también todos los access keys
     await ExtensionKey.update(
       { isActive: false },
       { where: { shop } }
     );
-    
+
     console.log(`✓ Tienda desinstalada: ${shop}`);
   } catch (error) {
     console.error('Error desinstalando tienda:', error);
@@ -284,7 +284,7 @@ async function createExtensionKey(shop, name = null) {
     }
 
     const accessKey = generateAccessKey();
-    
+
     const key = await ExtensionKey.create({
       shop,
       accessKey,
@@ -317,7 +317,7 @@ async function validateExtensionKey(accessKey) {
     if (key) {
       // Actualizar último uso
       await key.update({ lastUsedAt: new Date() });
-      
+
       return {
         shop: key.shop,
         accessToken: key.Shop.accessToken
@@ -359,7 +359,7 @@ async function revokeExtensionKey(accessKey, shop) {
         }
       }
     );
-    
+
     console.log(`✓ Access key revocado: ${accessKey.substring(0, 10)}...`);
   } catch (error) {
     console.error('Error revocando access key:', error);
@@ -405,23 +405,23 @@ module.exports = {
   Shop,
   ExtensionKey,
   SenderConfig,
-  
+
   // Funciones generales
   initDatabase,
-  
+
   // Shops
   saveShopSession,
   getShopSession,
   deleteShopSession,
   getActiveShopsCount,
-  
+
   // Extension Keys
   generateAccessKey,
   createExtensionKey,
   validateExtensionKey,
   getShopExtensionKeys,
   revokeExtensionKey,
-  
+
   // Sender Config
   saveSenderConfig,
   getSenderConfig

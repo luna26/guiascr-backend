@@ -31,11 +31,11 @@ app.use(express.json());
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SCOPES = 'read_orders,read_fulfillments';
-const APP_URL = process.env.RAILWAY_PUBLIC_DOMAIN 
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` 
+const APP_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : 'http://localhost:3000';
 
-  console.log('--------- APP_URL', APP_URL)
+console.log('--------- APP_URL', APP_URL)
 
 // Storage temporal para OAuth states
 const temporaryStates = new Map();
@@ -57,8 +57,8 @@ setInterval(() => {
 app.get('/api/auth', (req, res) => {
   const shop = req.query.shop;
 
-    console.log('🔵 INICIO OAuth para shop:', shop);
-  
+  console.log('🔵 INICIO OAuth para shop:', shop);
+
   if (!shop) {
     return res.status(400).send('Missing shop parameter');
   }
@@ -104,7 +104,7 @@ app.get('/api/auth/callback', async (req, res) => {
     .sort()
     .map(key => `${key}=${queryParams[key]}`)
     .join('&');
-  
+
   const hash = crypto
     .createHmac('sha256', SHOPIFY_API_SECRET)
     .update(queryString)
@@ -133,9 +133,9 @@ app.get('/api/auth/callback', async (req, res) => {
     const scope = tokenResponse.data.scope;
 
     console.log('💾 Guardando tienda:', shop);
-    
+
     await saveShopSession(shop, accessToken, scope);
-    
+
     console.log('✓ Tienda instalada:', shop);
 
     await createExtensionKey(shop, 'Access Key Inicial');
@@ -156,7 +156,7 @@ app.get('/api/auth/callback', async (req, res) => {
 
 async function verifySessionToken(req, res, next) {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing authorization header' });
   }
@@ -165,11 +165,11 @@ async function verifySessionToken(req, res, next) {
 
   try {
     const payload = jwt.decode(sessionToken);
-    
+
     if (!payload || !payload.dest) {
       return res.status(401).json({ error: 'Invalid token format' });
     }
-    
+
     const shop = payload.dest.replace('https://', '');
 
     // VERIFICAR TOKEN CON IGNOREEXPIRATION = TRUE
@@ -180,7 +180,7 @@ async function verifySessionToken(req, res, next) {
     // });
 
     const shopData = await getShopSession(shop);
-    
+
     if (!shopData || !shopData.isActive) {
       return res.status(401).json({ error: 'Shop not installed' });
     }
@@ -188,7 +188,7 @@ async function verifySessionToken(req, res, next) {
     req.shop = shop;
     req.accessToken = shopData.accessToken;
     req.authMethod = 'session_token';
-    
+
     next();
 
   } catch (error) {
@@ -203,7 +203,7 @@ async function verifySessionToken(req, res, next) {
 
 async function verifyExtensionKey(req, res, next) {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing authorization header' });
   }
@@ -216,7 +216,7 @@ async function verifyExtensionKey(req, res, next) {
 
   try {
     const keyData = await validateExtensionKey(accessKey);
-    
+
     if (!keyData) {
       return res.status(401).json({ error: 'Invalid or revoked access key' });
     }
@@ -224,7 +224,7 @@ async function verifyExtensionKey(req, res, next) {
     req.shop = keyData.shop;
     req.accessToken = keyData.accessToken;
     req.authMethod = 'extension_key';
-    
+
     next();
 
   } catch (error) {
@@ -309,7 +309,8 @@ app.delete('/api/app/extension-keys/:accessKey', verifySessionToken, async (req,
   }
 });
 
-app.post('/api/app/sender-config', verifySessionToken, async (req, res) => {
+app.post('/api/sender-config', verifyExtensionKey, async (req, res) => {
+
   try {
     const { shop } = req;
     const config = req.body;
@@ -332,6 +333,7 @@ app.post('/api/app/sender-config', verifySessionToken, async (req, res) => {
 
 app.get('/api/app/sender-config', verifySessionToken, async (req, res) => {
   try {
+    console.log('---------- sender config GET 1')
     const { shop } = req;
     const config = await getSenderConfig(shop);
 
@@ -357,110 +359,50 @@ app.get('/api/orders/pending', verifyExtensionKey, async (req, res) => {
   try {
     const { shop, accessToken } = req;
 
-    // Usar GraphQL en lugar de REST
-    const query = `
+    // Usar REST API en lugar de GraphQL
+    const response = await axios.get(
+      `https://${shop}/admin/api/2024-01/orders.json`,
       {
-        orders(first: 50, query: "financial_status:paid AND fulfillment_status:unfulfilled") {
-          edges {
-            node {
-              id
-              legacyResourceId
-              name
-              createdAt
-              totalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              customer {
-                firstName
-                lastName
-                email
-                phone
-              }
-              shippingAddress {
-                firstName
-                lastName
-                address1
-                address2
-                city
-                province
-                zip
-                country
-                phone
-              }
-              lineItems(first: 10) {
-                edges {
-                  node {
-                    title
-                    quantity
-                    originalUnitPriceSet {
-                      shopMoney {
-                        amount
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    console.log('📡 Haciendo request GraphQL a Shopify...');
-
-    const response = await axios.post(
-      `https://${shop}/admin/api/2024-01/graphql.json`,
-      { query },
-      {
+        params: {
+          status: 'any',
+          financial_status: 'paid',
+          fulfillment_status: 'unfulfilled',
+          limit: 50
+        },
         headers: {
-          'X-Shopify-Access-Token': accessToken,
-          'Content-Type': 'application/json'
+          'X-Shopify-Access-Token': accessToken
         }
       }
     );
 
-    console.log('📦 Response de Shopify:', JSON.stringify(response.data, null, 2));
-
-    // Validar respuesta
-    if (!response.data || !response.data.data || !response.data.data.orders) {
-      console.error('❌ Respuesta inválida de GraphQL');
-      return res.json({
-        success: true,
-        shop: shop,
-        count: 0,
-        orders: [],
-        message: 'No hay pedidos pendientes'
-      });
-    }
-
-    const orders = response.data.data.orders.edges.map(edge => {
-      const order = edge.node;
-      
-      return {
-        id: order.legacyResourceId,
-        order_number: order.name.replace('#', ''),
-        name: order.name,
-        created_at: order.createdAt,
-        total_price: order.totalPriceSet.shopMoney.amount,
-        currency: order.totalPriceSet.shopMoney.currencyCode,
-        customer: {
-          name: `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`,
-          email: order.customer?.email || '',
-          phone: order.customer?.phone || ''
-        },
-        shipping_address: order.shippingAddress,
-        line_items: order.lineItems.edges.map(item => ({
-          title: item.node.title,
-          quantity: item.node.quantity,
-          price: item.node.originalUnitPriceSet.shopMoney.amount
-        }))
-      };
-    });
-
-    console.log(`✅ ${orders.length} pedidos encontrados`);
+    const orders = response.data.orders.map(order => ({
+      id: order.id,
+      order_number: order.order_number,
+      name: order.name,
+      created_at: order.created_at,
+      total_price: order.total_price,
+      currency: order.currency,
+      note: order.note,
+      note_attributes: order.note_attributes || [], // ← Aquí están los attributes
+      customer: order.customer ? {
+        name: `${order.customer.first_name || ''} ${order.customer.last_name || ''}`,
+        email: order.customer.email || '',
+        phone: order.customer.phone || ''
+      } : null,
+      shipping_address: order.shipping_address,
+      line_items: order.line_items.map(item => ({
+        title: item.title,
+        quantity: item.quantity,
+        price: item.price
+      })),
+      // Extraer los custom attributes de ubicación
+      province_id: order.note_attributes?.find(a => a.name === 'province_id')?.value,
+      province_name: order.note_attributes?.find(a => a.name === 'province_name')?.value,
+      county_id: order.note_attributes?.find(a => a.name === 'county_id')?.value,
+      county_name: order.note_attributes?.find(a => a.name === 'county_name')?.value,
+      district_id: order.note_attributes?.find(a => a.name === 'district_id')?.value,
+      district_name: order.note_attributes?.find(a => a.name === 'district_name')?.value
+    }));
 
     res.json({
       success: true,
@@ -569,7 +511,7 @@ app.get('/api/sender-config', verifyExtensionKey, async (req, res) => {
 app.post('/api/webhooks/app/uninstalled', async (req, res) => {
   const hmac = req.headers['x-shopify-hmac-sha256'];
   const shop = req.headers['x-shopify-shop-domain'];
-  
+
   const hash = crypto
     .createHmac('sha256', SHOPIFY_API_SECRET)
     .update(JSON.stringify(req.body))
@@ -580,7 +522,7 @@ app.post('/api/webhooks/app/uninstalled', async (req, res) => {
   }
 
   await deleteShopSession(shop);
-  
+
   console.log(`App desinstalada de: ${shop}`);
   res.status(200).send('OK');
 });
@@ -628,7 +570,7 @@ async function registerWebhooks(shop, accessToken) {
 
 app.get('/api/health', async (req, res) => {
   const activeShops = await getActiveShopsCount();
-  
+
   res.json({
     success: true,
     message: 'API funcionando',
@@ -653,7 +595,7 @@ app.get('/', (req, res) => {
 
 async function startServer() {
   const dbReady = await initDatabase();
-  
+
   if (!dbReady) {
     console.error('✗ No se pudo conectar a la base de datos');
     process.exit(1);
@@ -662,7 +604,7 @@ async function startServer() {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, async () => {
     const activeShops = await getActiveShopsCount();
-    
+
     console.log('='.repeat(60));
     console.log('🚀 Servidor iniciado correctamente');
     console.log('='.repeat(60));
