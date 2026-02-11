@@ -347,6 +347,46 @@ async function getShopExtensionKeys(shop) {
   }
 }
 
+// Borrar TODOS los datos de una tienda
+async function deleteShopData(shop) {
+  try {
+    console.log(`🗑️ Deleting all data for shop: ${shop}`);
+
+    // Borrar todos los access keys de la tienda
+    const deletedKeys = await ExtensionKey.destroy({
+      where: { shop }
+    });
+
+    // Borrar todas las sessions de la tienda
+    const deletedSessions = await Session.destroy({
+      where: { shop }
+    });
+
+    // Borrar configuración de sender (si existe)
+    const deletedSenderConfigs = await SenderConfig.destroy({
+      where: { shop }
+    });
+
+    console.log(`✅ Shop data deleted: ${deletedKeys} keys, ${deletedSessions} sessions, ${deletedSenderConfigs} configs`);
+
+    return {
+      success: true,
+      deleted: {
+        keys: deletedKeys,
+        sessions: deletedSessions,
+        senderConfigs: deletedSenderConfigs
+      }
+    };
+
+  } catch (error) {
+    console.error('❌ Error deleting shop data:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
 // Revocar un access key
 async function revokeExtensionKey(accessKey, shop) {
   try {
@@ -414,6 +454,7 @@ module.exports = {
   getShopSession,
   deleteShopSession,
   getActiveShopsCount,
+  deleteShopData,
 
   // Extension Keys
   generateAccessKey,

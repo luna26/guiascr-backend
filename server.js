@@ -20,11 +20,13 @@ const {
   getShopExtensionKeys,
   revokeExtensionKey,
   saveSenderConfig,
-  getSenderConfig
+  getSenderConfig,
+  deleteShopData
 } = require('./database');
 
 const app = express();
 app.use(cors());
+app.use('/api/webhooks', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // Configuración
@@ -35,10 +37,18 @@ const APP_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : 'http://localhost:3000';
 
-console.log('--------- APP_URL', APP_URL)
-
 // Storage temporal para OAuth states
 const temporaryStates = new Map();
+
+// Función para verificar firma HMAC de Shopify
+function verifyShopifyWebhook(data, hmacHeader) {
+  const hash = crypto
+    .createHmac('sha256', process.env.SHOPIFY_API_SECRET)
+    .update(data, 'utf8')
+    .digest('base64');
+
+  return hash === hmacHeader;
+}
 
 // Limpiar states expirados
 setInterval(() => {
@@ -587,6 +597,70 @@ app.use(express.static('public'));
 
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/public/app.html');
+});
+
+// ========================================
+// WEBHOOKS GDPR OBLIGATORIOS
+// ========================================
+
+// 1. Customer Data Request
+app.post('/api/webhooks/customers/data_request', (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+
+  // Verificar que venga de Shopify
+  if (!verifyShopifyWebhook(req.body, hmac)) {
+    console.error('❌ HMAC verification failed');
+    return res.status(401).send('Unauthorized');
+  }
+
+  const webhook = JSON.parse(req.body.toString());
+  console.log('📧 Customer data request received:', webhook);
+
+  // TODO: Aquí deberías:
+  // 1. Buscar todos los datos del customer en tu DB
+  // 2. Enviarlos al email del cliente o endpoint que Shopify especifique
+  // Por ahora solo logueamos
+
+  res.status(200).send('OK');
+});
+
+// 2. Customer Redact (Borrar datos del cliente)
+app.post('/api/webhooks/customers/redact', async (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+
+  if (!verifyShopifyWebhook(req.body, hmac)) {
+    console.error('❌ HMAC verification failed');
+    return res.status(401).send('Unauthorized');
+  }
+
+  const webhook = JSON.parse(req.body.toString());
+  const shopDomain = webhook.shop_domain;
+  console.log('🗑️ Customer redact received:', webhook);
+
+  // Borrar todos los datos
+  const result = await deleteShopData(shopDomain);
+
+  res.status(200).send('OK');
+});
+
+// 3. Shop Redact (Borrar datos de la tienda)
+app.post('/api/webhooks/shop/redact', async (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+
+  if (!verifyShopifyWebhook(req.body, hmac)) {
+    console.error('❌ HMAC verification failed');
+    return res.status(401).send('Unauthorized');
+  }
+
+  const webhook = JSON.parse(req.body.toString());
+  console.log('🗑️ Shop redact received:', webhook);
+
+  // TODO: Borrar TODOS los datos de esta tienda
+  // const shopDomain = webhook.shop_domain;
+  // await db.query('DELETE FROM sessions WHERE shop = ?', [shopDomain]);
+  // await db.query('DELETE FROM sender_configs WHERE shop = ?', [shopDomain]);
+
+  res.status(200).send('OK');
 });
 
 // ============================================================================
