@@ -8,6 +8,7 @@ require('dotenv').config();
 
 //install app
 //https://oleomargaric-theosophic-vivienne.ngrok-free.dev/api/auth?shop=dev-mercatiko-app.myshopify.com
+//https://guiascr-backend-production.up.railway.app/api/auth?shop=dev-mercatiko-app.myshopify.com
 
 const {
   initDatabase,
@@ -647,11 +648,11 @@ app.get('/api/health', async (req, res) => {
 // APP EMBEDDED
 // ============================================================================
 
-app.use(express.static('public'));
+// app.use(express.static('public'));
 
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/app.html');
-});
+// app.get('/', (req, res) => {
+//   res.sendFile(__dirname + '/public/app.html');
+// });
 
 // ========================================
 // WEBHOOKS GDPR OBLIGATORIOS
