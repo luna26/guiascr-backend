@@ -537,6 +537,19 @@ app.post('/api/webhooks/app/uninstalled', async (req, res) => {
   res.status(200).send('OK');
 });
 
+app.post('/api/webhooks', (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+
+  // Verificar HMAC
+  if (!verifyShopifyWebhook(req.body, hmac)) {
+    console.log('❌ HMAC verification failed on /api/webhooks');
+    return res.status(401).send('Unauthorized');
+  }
+
+  console.log('✅ HMAC verification passed on /api/webhooks');
+  res.status(200).send('OK');
+});
+
 async function registerWebhooks(shop, accessToken) {
   const webhooks = [
     {
