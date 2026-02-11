@@ -25,7 +25,48 @@ const {
 } = require('./database');
 
 const app = express();
-app.use(cors());
+
+// CORS que permite TODO (App, Extension, Theme)
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (Postman, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    // Lista de orígenes permitidos
+    const allowedOrigins = [
+      'https://admin.shopify.com',
+      /https:\/\/.*\.myshopify\.com$/,
+      /https:\/\/.*\.cloudflare\.workers\.dev$/,
+      /https:\/\/.*\.trycloudflare\.com$/,
+      /chrome-extension:\/\/.*/, // ← Chrome Extensions
+    ];
+
+    // Verificar si el origin está permitido
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (typeof allowed === 'string') {
+        return origin === allowed;
+      } else {
+        return allowed.test(origin);
+      }
+    });
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.log('Origin bloqueado:', origin);
+      callback(null, true); // Permitir de todas formas (o cambiar a false para bloquear)
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true,
+  maxAge: 86400 // Cache preflight por 24 horas
+}));
+
+// Manejar OPTIONS explícitamente
+app.options('*', cors());
+
+// app.use(cors());
 app.use('/api/webhooks', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
